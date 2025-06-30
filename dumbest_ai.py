@@ -10,7 +10,7 @@ import hashlib
 import pickle
 import shutil # Dosya işlemleri için
 import time # Gecikme için eklendi
-import uuid # EKLENDİ: uuid modülü import edildi
+import uuid # uuid modülü import edildi
 
 import gradio as gr
 import torch
@@ -70,9 +70,9 @@ class RAGConfig:
     child_chunk_size: int = 64  # **Daha küçük varsayılan değer: Vektörleştirmek için daha küçük (child) parçalar**
     child_chunk_overlap: int = 16 # **Daha küçük varsayılan değer**
 
-    top_k_retrieval: int = 10
-    top_k_rerank: int = 5
-    temperature: float = 0.1
+    top_k_retrieval: int = 30
+    top_k_rerank: int = 10
+    temperature: float = 0.5
     max_memory_length: int = 10
     confidence_threshold: float = 0.7
     embedding_batch_size: int = 64 # Embedding batch boyutu
@@ -762,13 +762,13 @@ class AdvancedRAGSystem:
         )
 
         self.llm = OllamaLLM(
-            model="llama3",
+            model="deepseek-coder-v2:16b",
             temperature=config.temperature,
             top_p=0.9,
             repeat_penalty=1.1
         )
 
-        prompt_template = """Sen uzman bir yapay zeka asistansın ve özellikle .NET ve web geliştirme konularında deneyimlisin. Görevin, aşağıda verilen 'BAĞLAM BİLGİLERİ'ne dayanarak kullanıcının sorularını doğru, eksiksiz, detaylı ve açıklayıcı bir şekilde yanıtlamaktır.
+        prompt_template = """Sen, .NET ve web geliştirme konularında uzmanlaşmış, sadece bilgi vermekle kalmayıp aynı zamanda öğrenmeye ilham veren, deneyimli ve yaratıcı bir yapay zeka mentörüsün. Amacın, kullanıcının sorduğu sorulara sağlanan 'BAĞLAM BİLGİLERİ'nden yararlanarak derinlemesine, akılda kalıcı ve pratik çözümler sunmaktır. Yanıtlarını hazırlarken, karmaşık konuları basitleştiren benzetmeler ve gerçek dünya senaryoları kullanmaktan çekinme. Özellikle, kod tabanlı belgelerde gezinme yeteneğinle öne çıkarak, sorulan problemler için en uygun ve işlevsel kod örneklerini sağlamalısın.
 
 BAĞLAM BİLGİLERİ:
 {context}
@@ -776,14 +776,17 @@ BAĞLAM BİLGİLERİ:
 SOHBET GEÇMİŞİ:
 {chat_history}
 
-KULLERANIICI SORUSU: {question}
+KULLANICI SORUSU: {question}
 
-YÖNERGE:
-1. Yanıtını **öncelikle ve ağırlıklı olarak** 'BAĞLAM BİLGİLERİ' içinde yer alan bilgilere dayanarak oluştur. Kendi genel bilgilerini kullanmaktan kaçın, ancak bağlamı daha iyi açıklamak veya yapılandırmak için yardımcı olabilirsin.
-2. Eğer 'BAĞLAM BİLGİLERİ'nde soruyu yanıtlamak için yeterli veya ilgili bilgi yoksa, 'Üzgünüm, bu bilgiyi sağlanan belgelerde yeterince detaylı bulamadım veya ilgili bir bilgiye rastlamadım. Başka bir şey sormak ister misiniz?' şeklinde nazikçe belirt ve **asla yanıt UYDURMA**.
-3. Cevabını her zaman 'BAĞLAM BİLGİLERİ'ndeki ilgili kaynak numaralarıyla destekle (örn: [Kaynak 1], [Kaynak 2]).
-4. Yanıtlarını organize et (maddeler, başlıklar kullanabilirsin) ve karmaşık konuları anlaşılır bir dille açıkla. Mümkünse örnekler veya senaryolar sun.
-5. Yanıtının sonunda, cevabının ne kadar güvenilir olduğunu 0 ile 1 arasında bir ondalık sayı olarak 'Güvenilirlik Skoru:' şeklinde belirt. (Örn: Güvenilirlik Skoru: 0.95)
+SENİN YAKLAŞIMIN VE YÖNERGELERİN:
+1.  **Derinlemesine ve Yaratıcı Açıklama:** Soruyu, sadece yanıtlamakla kalmayıp, konunun temel prensiplerini ve olası geliştirme yaklaşımlarını da kapsayacak şekilde genişlet. Sorun çözme becerini ön plana çıkar.
+2.  **Kapsamlı Kod Örnekleri:** Eğer soru kod ile ilgiliyse veya kod örneği gerektiriyorsa, 'BAĞLAM BİLGİLERİ'nden edindiğin bilgileri kullanarak ilgili, temiz, yorumlanmış ve uygulanabilir C#, HTML, CSS, JavaScript veya diğer ilgili dillerdeki kod parçacıklarını ```dil_adı``` formatında sun. Açıklayıcı senaryolarla birlikte ver.
+3.  **Kritik Düşünme ve Alternatifler:** Eğer birden fazla geçerli çözüm varsa, bunları karşılaştır ve her birinin avantaj/dezavantajlarını belirt. Olası tuzaklara veya sıkça yapılan hatalara dikkat çek.
+4.  **Yapı ve Okunabilirlik:** Yanıtlarını hiyerarşik başlıklar, maddeler ve kod blokları kullanarak düzenli ve kolay okunabilir hale getir. Bilginin akışını mantıksal bir sıra ile sun.
+5.  **Kaynak Doğrulama ve Şeffaflık:** Yanıtındaki her önemli bilgi parçasını 'BAĞLAM BİLGİLERİ'ndeki ilgili kaynak numaralarıyla [Kaynak X] şeklinde destekle. Eğer soruya doğrudan yanıt verecek yeterli veya ilgili bilgi 'BAĞLAM BİLGİLERİ'nde yoksa, dürüstçe "Üzgünüm, bu konu hakkında sağlanan belgelerde yeterli bilgi bulamadım. Ancak genel olarak..." şeklinde bir giriş yapabilir veya "Başka bir konuda yardımcı olabilir miyim?" diye sorabilirsin. **Asla uydurma bilgi verme.**
+6.  **Geliştirici Odaklı Ton:** Bir mentör gibi, geliştiricilere hitap eden, teşvik edici ve çözüm odaklı bir dil kullan.
+
+Yanıtının sonunda, cevabının ne kadar güvenilir olduğunu 0 ile 1 arasında bir ondalık sayı olarak 'Güvenilirlik Skoru:' şeklinde belirt. (Örn: Güvenilirlik Skoru: 0.95)
 
 YANITIM:"""
 
@@ -973,16 +976,27 @@ def create_gradio_interface():
     """Gelişmiş Gradio arayüzü"""
 
     rag_system = AdvancedRAGSystem()
+    kb_status_initial_value = "<p>Bilgi bankası durumu bekleniyor...</p>"
+    
+    # Bilgi bankasını başlatma ve LLM zincirini başlatma sürecini try-except içine al
+    try:
+        logger.info("🏗️ Building knowledge base...")
+        vectorstore = rag_system.build_knowledge_base()
 
-    logger.info("🏗️ Building knowledge base...")
-    vectorstore = rag_system.build_knowledge_base()
-
-    if vectorstore is None:
-        logger.error("❌ Knowledge base creation failed!")
-        return None
-
-    logger.info("🔗 Initializing LLM chain...")
-    rag_system.initialize_llm_chain()
+        if vectorstore is None:
+            logger.error("❌ Knowledge base creation failed!")
+            kb_status_initial_value = "<p style='color: red;'>❌ Bilgi bankası oluşturulamadı! Lütfen konsolu kontrol edin.</p>"
+            # Eğer vectorstore None ise, LLM zincirini başlatmaya çalışmamalıyız.
+            # Ancak Gradio arayüzünün yüklenmesi için fonksiyonun sonuna kadar gitmeliyiz.
+        else:
+            logger.info("🔗 Initializing LLM chain...")
+            rag_system.initialize_llm_chain()
+            kb_status_initial_value = f"<p style='color: green;'>✅ Bilgi bankası hazır! ({len(rag_system.documents_for_bm25)} child belge parçası)</p>"
+            
+    except Exception as e:
+        logger.error(f"❌ Bilgi bankası veya LLM başlatılırken kritik hata: {e}")
+        kb_status_initial_value = f"<p style='color: red;'>❌ Başlangıç hatası: {str(e)}</p>"
+        # Hata durumunda bile arayüzü göstermeye devam et, böylece kullanıcı hatayı görebilir.
 
     chat_history = load_chat_history()
 
@@ -1062,7 +1076,110 @@ def create_gradio_interface():
                     value="<div style='padding: 10px;'><h4>⚡ Performans</h4><p>Hazır...</p></div>"
                 )
         
-        kb_status = gr.HTML(value="<p>Bilgi bankası hazır.</p>")
+        # kb_status'ın başlangıç değerini dinamik olarak ayarla
+        kb_status = gr.HTML(value=kb_status_initial_value)
+
+        def process_message(message: str, history: List[Dict]) -> Tuple[List[Dict], List[Dict], Dict, str, List[str], bool]:
+            if not message.strip():
+                return history, history, {}, "", gr.update(choices=[], visible=False)
+
+            start_time = datetime.now()
+
+            # Bu kontrolü eklemek önemli: Eğer RAG sistemi düzgün başlamadıysa, direkt hata döndür.
+            if rag_system.llm is None or rag_system.hybrid_retriever is None:
+                err_msg = "Sistem henüz tam olarak başlatılamadı. Lütfen bilgi bankası durumunu kontrol edin."
+                logger.error(err_msg)
+                history.append({"role": "user", "content": message})
+                history.append({"role": "assistant", "content": err_msg})
+                return history, history, {"error": err_msg}, "<p style='color: red;'>❌ Hata: Sistem hazır değil!</p>", gr.update(choices=[], visible=False)
+
+
+            response = rag_system.enhanced_query_processing(message)
+
+            processing_time = (datetime.now() - start_time).total_seconds()
+
+            history.append({"role": "user", "content": message})
+
+            answer = response["answer"]
+            confidence = response.get("confidence", 0.0)
+            sources = response.get("sources", [])
+
+            formatted_answer = f"{answer}\n\n"
+
+            if confidence < config.confidence_threshold:
+                formatted_answer += f"⚠️ **Güvenilirlik Skoru: {confidence:.2f}/1.0** (Düşük güvenilirlik)\n\n"
+            else:
+                formatted_answer += f"✅ **Güvenilirlik Skoru: {confidence:.2f}/1.0**\n\n"
+
+            if sources:
+                formatted_answer += "📚 **Kaynaklar:**\n"
+                for i, source in enumerate(sources[:config.top_k_rerank], 1):
+                    file_name = os.path.basename(source.get("original_file_path", "Bilinmeyen Dosya"))
+                    formatted_answer += f"   {i}. {file_name} (Skor: {source['score']:.3f})\n"
+
+            history.append({"role": "assistant", "content": formatted_answer})
+
+            suggestions_list = rag_system.get_follow_up_suggestions(message, response)
+
+            perf_html = f"""
+            <div style='padding: 10px; border-radius: 5px; background: #e8f5e8;'>
+                <h4>⚡ Son İşlem</h4>
+                <p><strong>Süre:</strong> {processing_time:.2f}s</p>
+                <p><strong>Bulunan Kaynak:</strong> {len(sources)}</p>
+                <p><strong>Güvenilirlik:</strong> {confidence:.2f}</p>
+                <p><strong>Cache:</strong> {'Hit' if response.get('cached') else 'Miss'}</p>
+            </div>
+            """
+
+            save_chat_history(history)
+
+            return (
+                history,
+                history,
+                response,
+                perf_html,
+                gr.update(choices=suggestions_list, visible=True if suggestions_list else False),
+            )
+
+        def handle_suggestion_click(suggestion: str, history: List[Dict]):
+            if suggestion:
+                _history, _history_state, _response_details, _perf_html, _suggestions_update = process_message(suggestion, history)
+                return (_history, _history_state, _response_details, _perf_html, gr.update(choices=[], visible=False))
+
+            return history, history, {}, "", gr.update(choices=[], visible=False)
+
+
+        submit_btn.click(
+            fn=process_message,
+            inputs=[msg_input, chatbot],
+            outputs=[chatbot, chatbot, response_details, performance_metrics, suggestions]
+        ).then(
+            fn=lambda: "",
+            outputs=msg_input
+        )
+
+        msg_input.submit(
+            fn=process_message,
+            inputs=[msg_input, chatbot],
+            outputs=[chatbot, chatbot, response_details, performance_metrics, suggestions]
+        ).then(
+            fn=lambda: "",
+            outputs=msg_input
+        )
+
+
+        clear_btn = gr.Button("🗑️ Sohbeti Temizle", variant="secondary")
+
+        def clear_chat():
+            rag_system.memory.clear()
+            empty_history = []
+            save_chat_history(empty_history)
+            return empty_history, {}, "<div style='padding: 10px;'><h4>⚡ Performans</h4><p>Temizlendi...</p></div>", gr.update(choices=[], visible=False)
+
+        clear_btn.click(
+            fn=clear_chat,
+            outputs=[chatbot, response_details, performance_metrics, suggestions]
+        )
 
         with gr.Accordion("🔧 Sistem Ayarları", open=False):
             with gr.Row():
