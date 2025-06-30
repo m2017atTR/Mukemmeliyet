@@ -10,6 +10,7 @@ import hashlib
 import pickle
 import shutil # Dosya işlemleri için
 import time # Gecikme için eklendi
+import uuid # EKLENDİ: uuid modülü import edildi
 
 import gradio as gr
 import torch
@@ -68,7 +69,6 @@ class RAGConfig:
     parent_chunk_overlap: int = 256
     child_chunk_size: int = 64  # **Daha küçük varsayılan değer: Vektörleştirmek için daha küçük (child) parçalar**
     child_chunk_overlap: int = 16 # **Daha küçük varsayılan değer**
-    vectorstore_add_batch_size: int = 2 # **TEKRAR GÜNCELLENDİ: ChromaDB'ye doküman ekleme batch boyutu, 100 yerine 15 olarak ayarlandı**
 
     top_k_retrieval: int = 10
     top_k_rerank: int = 5
@@ -76,7 +76,8 @@ class RAGConfig:
     max_memory_length: int = 10
     confidence_threshold: float = 0.7
     embedding_batch_size: int = 64 # Embedding batch boyutu
-    
+    # ÖNEMLİ: vectorstore_add_batch_size, ChromaDB'nin tek seferde işleyebileceği child chunk sayısı olmalı (yaklaşık 5000-5461)
+    vectorstore_add_batch_size: int = 4000 # Varsayılan olarak 4000 olarak güncellendi.
     # Processed file metadata'yı tutacak dosya
     processed_files_meta_file: str = os.path.join("cache", "processed_files_meta.json")
 
@@ -515,12 +516,13 @@ class AdvancedRAGSystem:
         )
 
         # ParentDocumentRetriever'ı initialize et
+        # Bu Retriever'ı artık sadece child_splitter ve parent_splitter'ı kullanmak için tutuyoruz.
+        # add_documents metodunu artık doğrudan çağırmıyoruz, çünkü manuel olarak yöneteceğiz.
         self.parent_document_retriever = ParentDocumentRetriever(
-            vectorstore=self.vectorstore,
+            vectorstore=self.vectorstore, # Placeholder, aslında manuel olarak ekleyeceğiz
             docstore=self.docstore,
             child_splitter=RecursiveCharacterTextSplitter(chunk_size=config.child_chunk_size, chunk_overlap=config.child_chunk_overlap),
             parent_splitter=RecursiveCharacterTextSplitter(chunk_size=config.parent_chunk_size, chunk_overlap=config.parent_chunk_overlap),
-            # ID genarator, parent_id_key ve child_id_key default olarak gelir.
         )
 
 
@@ -561,47 +563,99 @@ class AdvancedRAGSystem:
                     pass # Already processed and not modified, no action needed for original documents
 
 
-        # 2. Silinen belgeleri belirle ve ParentDocumentRetriever'dan kaldır
+        # 2. Silinen belgeleri belirle ve docstore/vectorstore'dan kaldır
         deleted_file_paths = []
         for processed_file_path, meta in list(self.processed_files_meta.items()):
             if processed_file_path not in current_files_in_dir:
                 logger.info(f"🗑️ Found deleted document (metadata will be removed): {processed_file_path}")
                 parent_id_to_delete = hashlib.md5(processed_file_path.encode('utf-8')).hexdigest()
                 
+                # Docstore'dan kaldır
                 if hasattr(self.docstore, 'delete') and parent_id_to_delete in self.docstore.docs:
                     self.docstore.delete([parent_id_to_delete])
                     logger.info(f"Deleted parent document {parent_id_to_delete} from docstore.")
                 
+                # Vectorstore'dan ilgili child chunk'ları kaldır
+                # Bu, ChromaDB'nin delete metodunu kullanarak metadata filtrelemesiyle yapılabilir.
+                try:
+                    self.vectorstore._collection.delete(where={"parent_id": parent_id_to_delete})
+                    logger.info(f"Deleted child chunks for parent_id {parent_id_to_delete} from vectorstore.")
+                except Exception as e:
+                    logger.error(f"❌ Error deleting child chunks from vectorstore for {parent_id_to_delete}: {e}")
+
                 deleted_file_paths.append(processed_file_path)
                 del self.processed_files_meta[processed_file_path]
         
         if deleted_file_paths:
-            logger.warning("Note: Deletion of associated chunks from vectorstore for removed files is not fully automated. Use 'Tamamen Yeniden Oluştur' for a complete cleanup.")
+            logger.warning(f"Note: {len(deleted_file_paths)} deleted files processed.")
 
-        # 3. Yeni/Değiştirilmiş orijinal belgeleri ParentDocumentRetriever'a batch'ler halinde ekle
+        # 3. Yeni/Değiştirilmiş orijinal belgeleri manuel olarak işleyip Chroma'ya ekle
         if new_or_modified_original_documents_to_add:
-            total_docs_to_add = len(new_or_modified_original_documents_to_add)
-            logger.info(f"➕ Adding {total_docs_to_add} new/modified original documents to ParentDocumentRetriever in batches.")
+            total_original_docs_to_add = len(new_or_modified_original_documents_to_add)
+            logger.info(f"➕ Processing {total_original_docs_to_add} new/modified original documents for vectorstore.")
 
-            # Belgeleri küçük partiler halinde ParentDocumentRetriever'a ekle
-            for i in range(0, total_docs_to_add, config.vectorstore_add_batch_size):
-                batch = new_or_modified_original_documents_to_add[i:i + config.vectorstore_add_batch_size]
-                logger.info(f"    Processing batch {int(i/config.vectorstore_add_batch_size) + 1}/{(total_docs_to_add + config.vectorstore_add_batch_size - 1) // config.vectorstore_add_batch_size} (documents {i+1}-{min(i+config.vectorstore_add_batch_size, total_docs_to_add)} of {total_docs_to_add})...")
-                self.parent_document_retriever.add_documents(batch)
-            logger.info("✅ ParentDocumentRetriever updated.")
+            all_new_child_chunks = []
+            
+            # Parent dokümanları parçala ve docstore'a ekle, çocuk chunk'ları topla
+            for i, original_doc in enumerate(new_or_modified_original_documents_to_add):
+                logger.info(f"    Chunking original document {i+1}/{total_original_docs_to_add}: {original_doc.metadata.get('original_file_path', 'N/A')}")
+                
+                # Parent dokümanı parent_splitter ile parçala
+                parent_chunks_from_original_doc = self.parent_document_retriever.parent_splitter.split_documents([original_doc])
+                
+                for parent_piece_of_original_doc in parent_chunks_from_original_doc:
+                    # Yeni bir ID atayalım, çünkü bu aslında bir "alt-parent" parça oluyor orijinal belge için
+                    # Bu ID, ParentDocumentRetriever'ın internal parent_id'si gibi davranacak
+                    current_parent_piece_id = str(uuid.uuid4()) # Her parent parçasına yeni bir ID
+                    parent_piece_of_original_doc.metadata['id'] = current_parent_piece_id # Metadata'ya ekle
+                    parent_piece_of_original_doc.metadata['original_file_path'] = original_doc.metadata['original_file_path']
+
+                    # Düzeltme: mset metodu key-value tuple'larından oluşan bir liste bekler
+                    self.docstore.mset([(current_parent_piece_id, parent_piece_of_original_doc)]) 
+                    
+                    # Bu parent parçayı child_splitter ile parçala
+                    child_chunks_from_parent_piece = self.parent_document_retriever.child_splitter.split_documents([parent_piece_of_original_doc])
+                    
+                    for child_chunk in child_chunks_from_parent_piece:
+                        # Child chunk'a orijinal dosya yolunu ve parent ID'yi ekle
+                        child_chunk.metadata['original_file_path'] = original_doc.metadata['original_file_path']
+                        child_chunk.metadata['parent_id'] = current_parent_piece_id # Bu child'ın ait olduğu parent parçanın ID'si
+                        child_chunk.metadata['parent_doc_id'] = current_parent_piece_id # Langchain'in beklediği anahtar
+                        all_new_child_chunks.append(child_chunk)
+            
+            # Şimdi tüm toplanan child chunk'ları küçük partiler halinde Chroma'ya ekle
+            if all_new_child_chunks:
+                logger.info(f"Total {len(all_new_child_chunks)} child chunks generated. Adding to vectorstore in batches of {config.vectorstore_add_batch_size}.")
+                for i in range(0, len(all_new_child_chunks), config.vectorstore_add_batch_size):
+                    sub_batch = all_new_child_chunks[i:i + config.vectorstore_add_batch_size]
+                    
+                    try:
+                        self.vectorstore.add_documents(sub_batch)
+                        logger.info(f"    Added batch {int(i/config.vectorstore_add_batch_size) + 1}/{(len(all_new_child_chunks) + config.vectorstore_add_batch_size - 1) // config.vectorstore_add_batch_size} to ChromaDB.")
+                    except Exception as e:
+                        logger.error(f"❌ Error adding child chunks batch to ChromaDB: {e}. Batch size was {len(sub_batch)}")
+                        raise
+
+            logger.info("✅ Vectorstore updated with new/modified documents.")
         else:
-            logger.info("ℹ️ No new or modified original documents to add to ParentDocumentRetriever (all are up-to-date or no files found).")
+            logger.info("ℹ️ No new or modified original documents to add to vectorstore (all are up-to-date or no files found).")
         
         # BM25 için güncel documents_for_bm25 listesini doldur (tüm child chunks)
+        # Bu kısım, tüm child chunk'ları yeniden yükleyerek güncel listeyi oluşturur.
+        # Bu, önceki ekleme/silme işlemlerinden sonra tutarlılığı sağlar.
         self.documents_for_bm25 = []
-        for file_path_rel, meta in self.processed_files_meta.items():
+        # Tüm işlenmiş dosyaların metadataları üzerinden geçerek child chunk'ları yeniden yükle
+        # Bu, `processed_files_meta`'da olan tüm dosyaların BM25 için yeniden yüklenmesini sağlar.
+        for file_path_rel, meta in list(self.processed_files_meta.items()): # list() çağrısı, döngü sırasında dict değişirse sorun olmaması için
             full_file_path = os.path.join(config.documents_dir, file_path_rel)
+            # _load_single_document_and_chunk zaten child chunk'lar üretip döndürüyor.
             loaded_chunks_for_bm25 = self._load_single_document_and_chunk(full_file_path)
             if loaded_chunks_for_bm25:
-                logger.info(f"Loaded {len(loaded_chunks_for_bm25)} child chunks for BM25 from {file_path_rel}.")
+                # logger.info(f"Loaded {len(loaded_chunks_for_bm25)} child chunks for BM25 from {file_path_rel}.") # Çok fazla log olabilir
                 self.documents_for_bm25.extend(loaded_chunks_for_bm25)
             else:
                 logger.warning(f"⚠️ Could not re-load chunks for BM25 from {full_file_path}. Document might be missing, unreadable, or produced no chunks after splitting.")
+
 
         if not self.documents_for_bm25:
             logger.warning("No documents loaded into self.documents_for_bm25 for BM25 retriever, keyword search may not function correctly.")
@@ -686,6 +740,7 @@ class AdvancedRAGSystem:
                 if chunk.page_content.strip():
                     chunk.metadata['id'] = f"{file_base_hash}_{i}"
                     chunk.metadata['original_file_path'] = os.path.relpath(file_path, config.documents_dir)
+                    # Buradaki parent_id, orijinal dosyanın ID'si olmalı
                     chunk.metadata['parent_id'] = file_base_hash 
                     processed_chunks.append(chunk)
                 else:
@@ -770,8 +825,8 @@ YANITIM:"""
         unique_parent_ids = set()
         
         for child_doc, score in reranked_child_docs_with_scores:
-            parent_id = child_doc.metadata.get('parent_doc_id')
-            if not parent_id:
+            parent_id = child_doc.metadata.get('parent_doc_id') # Langchain'in atadığı parent_doc_id
+            if not parent_id: # Fallback: Bizim manuel atadığımız parent_id
                 parent_id = child_doc.metadata.get('parent_id')
 
             if parent_id and parent_id not in unique_parent_ids:
@@ -1009,105 +1064,6 @@ def create_gradio_interface():
         
         kb_status = gr.HTML(value="<p>Bilgi bankası hazır.</p>")
 
-        def process_message(message: str, history: List[Dict]) -> Tuple[List[Dict], List[Dict], Dict, str, List[str], bool]:
-            if not message.strip():
-                return history, history, {}, "", gr.update(choices=[], visible=False)
-
-            start_time = datetime.now()
-
-            response = rag_system.enhanced_query_processing(message)
-
-            processing_time = (datetime.now() - start_time).total_seconds()
-
-            history.append({"role": "user", "content": message})
-
-            answer = response["answer"]
-            confidence = response.get("confidence", 0.0)
-            sources = response.get("sources", [])
-
-            formatted_answer = f"{answer}\n\n"
-
-            if confidence < config.confidence_threshold:
-                formatted_answer += f"⚠️ **Güvenilirlik Skoru: {confidence:.2f}/1.0** (Düşük güvenilirlik)\n\n"
-            else:
-                formatted_answer += f"✅ **Güvenilirlik Skoru: {confidence:.2f}/1.0**\n\n"
-
-            if sources:
-                formatted_answer += "📚 **Kaynaklar:**\n"
-                for i, source in enumerate(sources[:config.top_k_rerank], 1):
-                    file_name = os.path.basename(source.get("original_file_path", "Bilinmeyen Dosya"))
-                    formatted_answer += f"   {i}. {file_name} (Skor: {source['score']:.3f})\n"
-
-            history.append({"role": "assistant", "content": formatted_answer})
-
-            suggestions_list = rag_system.get_follow_up_suggestions(message, response)
-
-            perf_html = f"""
-            <div style='padding: 10px; border-radius: 5px; background: #e8f5e8;'>
-                <h4>⚡ Son İşlem</h4>
-                <p><strong>Süre:</strong> {processing_time:.2f}s</p>
-                <p><strong>Bulunan Kaynak:</strong> {len(sources)}</p>
-                <p><strong>Güvenilirlik:</strong> {confidence:.2f}</p>
-                <p><strong>Cache:</strong> {'Hit' if response.get('cached') else 'Miss'}</p>
-            </div>
-            """
-
-            save_chat_history(history)
-
-            return (
-                history,
-                history,
-                response,
-                perf_html,
-                gr.update(choices=suggestions_list, visible=True if suggestions_list else False),
-            )
-
-        def handle_suggestion_click(suggestion: str, history: List[Dict]):
-            if suggestion:
-                _history, _history_state, _response_details, _perf_html, _suggestions_update = process_message(suggestion, history)
-                return (_history, _history_state, _response_details, _perf_html, gr.update(choices=[], visible=False))
-
-            return history, history, {}, "", gr.update(choices=[], visible=False)
-
-
-        submit_btn.click(
-            fn=process_message,
-            inputs=[msg_input, chatbot],
-            outputs=[chatbot, chatbot, response_details, performance_metrics, suggestions]
-        ).then(
-            fn=lambda: "",
-            outputs=msg_input
-        )
-
-        msg_input.submit(
-            fn=process_message,
-            inputs=[msg_input, chatbot],
-            outputs=[chatbot, chatbot, response_details, performance_metrics, suggestions]
-        ).then(
-            fn=lambda: "",
-            outputs=msg_input
-        )
-
-        suggestions.change(
-            fn=handle_suggestion_click,
-            inputs=[suggestions, chatbot],
-            outputs=[chatbot, chatbot, response_details, performance_metrics, suggestions]
-        )
-
-
-        clear_btn = gr.Button("🗑️ Sohbeti Temizle", variant="secondary")
-
-        def clear_chat():
-            rag_system.memory.clear()
-            empty_history = []
-            save_chat_history(empty_history)
-            return empty_history, {}, "<div style='padding: 10px;'><h4>⚡ Performans</h4><p>Temizlendi...</p></div>", gr.update(choices=[], visible=False)
-
-        clear_btn.click(
-            fn=clear_chat,
-            outputs=[chatbot, response_details, performance_metrics, suggestions]
-        )
-
         with gr.Accordion("🔧 Sistem Ayarları", open=False):
             with gr.Row():
                 parent_chunk_size_slider = gr.Slider(
@@ -1144,10 +1100,9 @@ def create_gradio_interface():
                     minimum=1, maximum=256, value=config.embedding_batch_size,
                     label="Embedding Batch Size", info="Embedding işlemi için aynı anda işlenen parça sayısı"
                 )
-                # Yeni slider eklendi
                 vectorstore_add_batch_size_slider = gr.Slider(
-                    minimum=1, maximum=50, value=config.vectorstore_add_batch_size, # Max değeri 50 olarak güncellendi, başlangıç 15
-                    label="Vectorstore Add Batch Size", info="Vektör veritabanına aynı anda eklenecek belge (chunk) sayısı"
+                    minimum=1, maximum=5000, value=config.vectorstore_add_batch_size,
+                    label="Vectorstore Add Batch Size", info="Vektör veritabanına aynı anda eklenecek belge (child chunk) sayısı"
                 )
 
 
