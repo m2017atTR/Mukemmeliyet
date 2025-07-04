@@ -1,0 +1,70 @@
+Alpine Hayır ... Petite Vue
+Eveeet Hayır... ....
+Hey gidi AngularJs .... ne günlere kaldık... Her jenerasyon değşiminde Windows Vista :D paradoksu
+
+Alpine.directive('template-outlet', (el, { expression }, { evaluate }) => {
+    let xRefName;
+
+    // Expression'ı string olarak al ve temizle
+    if (typeof expression === 'string') {
+        xRefName = expression.replace(/['"]/g, '');
+    } else {
+        console.error(`[x-template-outlet] Hatalı ifade: '${expression}'`);
+        return;
+    }
+
+    // Template'i bulma fonksiyonu
+    const findAndUseTemplate = () => {
+        const foundTemplates = document.querySelectorAll(`template[x-ref="${xRefName}"]`);
+
+        if (foundTemplates.length === 0) {
+            // Template henüz yüklenmemişse, kısa bir süre sonra tekrar dene
+            setTimeout(findAndUseTemplate, 100);
+            return;
+        }
+
+        if (foundTemplates.length > 1) {
+            console.error(`[x-template-outlet] '${xRefName}' adında birden fazla <template> bulundu.`);
+            return;
+        }
+
+        const templateRef = foundTemplates[0];
+
+        // Template içeriğini klonla
+        const templateContent = templateRef.content;
+        if (!templateContent || !templateContent.firstElementChild) {
+            console.error('[x-template-outlet] Template içeriği boş.');
+            return;
+        }
+
+        const clone = templateContent.cloneNode(true).firstElementChild;
+
+        // Alpine scope'u bağla
+        try {
+            const dataStack = Alpine.closestDataStack(el);
+            if (dataStack && dataStack.length > 0) {
+                Alpine.addScopeToNode(clone, dataStack[0], el.parentElement);
+            }
+        } catch (error) {
+            console.error('[x-template-outlet] Scope bağlama hatası:', error);
+        }
+
+        // DOM'u güncelle
+        const commentNode = document.createComment(` template-outlet (${expression}) `);
+
+        Alpine.mutateDom(() => {
+            try {
+                el.after(commentNode);
+                commentNode.after(clone);
+                Alpine.initTree(clone);
+                el.remove();
+                Alpine.destroyTree(el);
+            } catch (error) {
+                console.error('[x-template-outlet] DOM güncelleme hatası:', error);
+            }
+        });
+    };
+
+    // Template'i bul ve kullan
+    findAndUseTemplate();
+});
