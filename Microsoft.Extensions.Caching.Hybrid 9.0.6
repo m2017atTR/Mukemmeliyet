@@ -1,0 +1,97 @@
+*Microsoft.Extensions.Caching.Hybrid*
+
+<PackageReference Include="Microsoft.Extensions.Caching.Hybrid" Version="9.6.0" />
+
+Dökümantasyon eksikliği ve Mongo Collection larda Object Id seralizasyon sorunları. 
+
+Yetmezmiş gibi IMvcBuilder AddJsonOptions ve diğer Json Serialize sorunları. Kaybedilen 1 saat ve yeni Factory hayırlı olsun. da Gerek var mı?
+
+``` c#
+  builder.Services.AddSingleton<JsonSerializerOptions>(sp =>
+  {
+      var opts = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+      opts.Converters.Add(new ObjectIdJsonConverter());
+      return opts;
+  });
+
+  builder.Services.AddHybridCache(options =>
+  {
+      // Maximum size of cached items
+      options.MaximumPayloadBytes = 1024 * 1024 * 10; // 10MB
+      options.MaximumKeyLength = 512;
+
+      // Default timeouts
+      options.DefaultEntryOptions = new HybridCacheEntryOptions
+      {
+          Expiration = TimeSpan.FromMinutes(30),
+          LocalCacheExpiration = TimeSpan.FromMinutes(30),
+      };
+      
+  }).AddSerializerFactory<HybridCacheJsonSerializerFactory>(); 
+
+```
+...
+
+``` c#
+// ObjectId için custom JsonConverter
+public class ObjectIdJsonConverter : JsonConverter<ObjectId>
+{
+    public override ObjectId Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        var value = reader.GetString();
+        return string.IsNullOrEmpty(value) ? ObjectId.Empty : ObjectId.Parse(value);
+    }
+
+    public override void Write(Utf8JsonWriter writer, ObjectId value, JsonSerializerOptions options)
+    {
+        writer.WriteStringValue(value.ToString());
+    }
+}
+
+
+public class HybridCacheJsonSerializerFactory : IHybridCacheSerializerFactory
+{
+    private readonly JsonSerializerOptions _options;
+
+    public HybridCacheJsonSerializerFactory(JsonSerializerOptions options)
+    {
+        _options = options;
+    }
+
+    public bool TryCreateSerializer<T>(out IHybridCacheSerializer<T>? serializer)
+    {
+        serializer = new SystemTextJsonHybridCacheSerializer<T>(_options);
+        return true;
+    }
+}
+public class SystemTextJsonHybridCacheSerializer<T> : IHybridCacheSerializer<T>
+{
+    private readonly JsonSerializerOptions _options;
+
+    public SystemTextJsonHybridCacheSerializer(JsonSerializerOptions options)
+    {
+        _options = options;
+    }
+
+    public T Deserialize(ReadOnlySequence<byte> source)
+    {
+        if (source.IsSingleSegment)
+        {
+            return JsonSerializer.Deserialize<T>(source.First.Span, _options)!;
+        }
+        else
+        {
+            // Çok segmentliyse copy yap
+            var buffer = new byte[source.Length];
+            source.CopyTo(buffer);
+            return JsonSerializer.Deserialize<T>(buffer, _options)!;
+        }
+    }
+
+    public void Serialize(T value, IBufferWriter<byte> target)
+    {
+        using var writer = new Utf8JsonWriter(target);
+        JsonSerializer.Serialize(writer, value, _options);
+        writer.Flush();
+    }
+}```
