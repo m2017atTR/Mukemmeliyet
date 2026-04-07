@@ -2,9 +2,6 @@
 Mükemmel Dökümantasyonlar
 
 
-Here is the English translation of your text, as requested, without any additional commentary:
-
----
 
 I've been messing around with artificial intelligence for a few days now. Is it perfect? Yes...
 
